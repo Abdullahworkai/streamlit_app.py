@@ -13,7 +13,6 @@ import time
 # CrewAI imports
 from crewai import Agent, Task, Crew, Process
 from langchain_openai import ChatOpenAI
-from langchain.llms import OpenAI
 
 # Configure logging
 logging.basicConfig(

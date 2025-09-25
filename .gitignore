@@ -1,0 +1,7 @@
+.streamlit/
+.env
+long_term_memory.json
+crew.log
+__pycache__/
+*.pyc
+.DS_Store

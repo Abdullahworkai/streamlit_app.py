@@ -521,7 +521,7 @@ You MUST return ONLY valid JSON in this exact format:
         
         # Create ONE crew that will be reused for all students
         crew = Crew(
-            agents=[self.manager_agent, self.vocabulary_agent, self.grammar_agent,
+            agents=[self.vocabulary_agent, self.grammar_agent,
                    self.task_achievement_agent, self.range_accuracy_agent, self.quality_agent],
             tasks=[vocabulary_task, grammar_task, task_achievement_task,
                   range_accuracy_task, quality_task],

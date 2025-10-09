@@ -190,7 +190,7 @@ class FeedbackManager:
         return "No previous feedback available."
 
 class CrewAIManager:
-    """Manage CrewAI agents and evaluation process"""
+    """Manage CrewAI agents and evaluation process with kickoff_for_each_async"""
     
     def __init__(self, klp_loader, feedback_manager):
         self.klp_loader = klp_loader
@@ -201,7 +201,7 @@ class CrewAIManager:
             max_tokens=3000
         )
         
-        # Initialize agents
+        # Initialize agents ONCE - reused for all students
         self.vocabulary_agent = self.create_vocabulary_agent()
         self.grammar_agent = self.create_grammar_agent()
         self.task_achievement_agent = self.create_task_achievement_agent()
@@ -211,20 +211,21 @@ class CrewAIManager:
     
     def create_manager_agent(self):
         """Create manager agent for hierarchical delegation"""
-        feedback_context = self.feedback_manager.get_latest_feedback()
-        
         return Agent(
             role="Senior Evaluation Manager",
             goal="""Coordinate comprehensive student writing evaluations by delegating 
             to specialized agents and ensuring consistent standards across all assessments.""",
             backstory="""You are an experienced academic evaluation coordinator with 20+ years 
             in language assessment. You oversee a team of specialized evaluators and ensure 
-            every student receives fair, thorough, and constructive feedback.""",
+            every student receives fair, thorough, and constructive feedback. You delegate 
+            vocabulary tasks to the Vocabulary Evaluator, grammar tasks to the Grammar Evaluator, 
+            task achievement to the Task Achievement Specialist, range and accuracy to the 
+            Range and Accuracy Specialist, and final synthesis to the Quality Assurance Lead.""",
             verbose=True,
             allow_delegation=True,
             llm=self.llm,
-            memory=True,
-            max_iter=5,
+            memory=False,
+            max_iter=15,
         )
     
     def create_vocabulary_agent(self):
@@ -234,12 +235,12 @@ class CrewAIManager:
             goal="Evaluate vocabulary usage strictly based on the provided KLP vocabulary list",
             backstory="""You are a vocabulary assessment specialist. You ONLY count vocabulary 
             words that appear in the provided KLP vocabulary list. You follow the exact scoring 
-            rubric without deviation.""",
+            rubric without deviation. You always return valid JSON.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            memory=True,
-            max_iter=3,
+            memory=False,
+            max_iter=10,
         )
     
     def create_grammar_agent(self):
@@ -249,12 +250,12 @@ class CrewAIManager:
             goal="Evaluate grammar structure usage strictly based on the provided KLP grammar structures",
             backstory="""You are a grammar assessment specialist. You ONLY count grammar 
             structures that appear in the provided KLP grammar list. You follow the exact 
-            scoring rubric without deviation.""",
+            scoring rubric without deviation. You always return valid JSON.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            memory=True,
-            max_iter=3,
+            memory=False,
+            max_iter=10,
         )
     
     def create_task_achievement_agent(self):
@@ -264,12 +265,12 @@ class CrewAIManager:
             goal="Evaluate how completely students answer all parts and stay within word limit",
             backstory="""You are an expert in evaluating task completion. You assess whether 
             students answered all parts of the question and stayed within the word limit. 
-            You follow the exact scoring rubric without deviation.""",
+            You follow the exact scoring rubric without deviation. You always return valid JSON.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            memory=True,
-            max_iter=3,
+            memory=False,
+            max_iter=10,
         )
     
     def create_range_accuracy_agent(self):
@@ -279,12 +280,13 @@ class CrewAIManager:
             goal="Evaluate grammar, punctuation, and spelling quality",
             backstory="""You are a language quality specialist who evaluates the overall 
             quality of grammar, punctuation, and spelling. You assess the range of structures 
-            and accuracy of language use. You follow the exact scoring rubric without deviation.""",
+            and accuracy of language use. You follow the exact scoring rubric without deviation. 
+            You always return valid JSON.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            memory=True,
-            max_iter=3,
+            memory=False,
+            max_iter=10,
         )
     
     def create_quality_agent(self):
@@ -294,23 +296,30 @@ class CrewAIManager:
             goal="Synthesize all evaluations into comprehensive, actionable feedback",
             backstory="""You are the final quality check for all student assessments. 
             You review scores from all specialists, ensure consistency, and craft final 
-            feedback that is constructive, specific, and helpful for student improvement.""",
+            feedback that is constructive, specific, and helpful for student improvement. 
+            You always return valid JSON.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            memory=True,
-            max_iter=3,
+            memory=False,
+            max_iter=10,
         )
     
     def parse_agent_output(self, output_text):
-        """Parse JSON from agent output"""
+        """Parse JSON from agent output with improved extraction"""
         try:
+            # Remove markdown code blocks if present
+            cleaned = re.sub(r'```json\s*|\s*```', '', str(output_text))
+            
             # Try to find JSON in the output
-            json_match = re.search(r'\{.*\}', str(output_text), re.DOTALL)
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(0))
+                parsed = json.loads(json_match.group(0))
+                logging.info(f"Successfully parsed JSON: {parsed}")
+                return parsed
             
             # If no JSON found, try to extract scores from text
+            logging.warning("No JSON found, attempting text extraction")
             scores = {}
             
             vocab_match = re.search(r'vocabulary[_\s]+score[:\s]+(\d+)', str(output_text), re.IGNORECASE)
@@ -325,39 +334,75 @@ class CrewAIManager:
             if task_match:
                 scores['task_achievement_score'] = int(task_match.group(1))
             
-            range_match = re.search(r'range[_\s]+accuracy[_\s]+score[:\s]+(\d+)', str(output_text), re.IGNORECASE)
+            range_match = re.search(r'range[_\s]+(?:and[_\s]+)?accuracy[_\s]+score[:\s]+(\d+)', str(output_text), re.IGNORECASE)
             if range_match:
                 scores['range_accuracy_score'] = int(range_match.group(1))
             
-            return scores if scores else None
+            feedback_match = re.search(r'(?:final[_\s]+)?feedback[:\s]+"?([^"\n]+)"?', str(output_text), re.IGNORECASE)
+            if feedback_match:
+                scores['final_feedback'] = feedback_match.group(1).strip()
             
+            if scores:
+                logging.info(f"Extracted scores from text: {scores}")
+                return scores
+            
+            logging.error("No scores found in output")
+            return None
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error: {e}")
+            return None
         except Exception as e:
             logging.error(f"Error parsing output: {e}")
             return None
     
+    def validate_scores(self, result_data):
+        """Validate and clamp scores to correct ranges"""
+        # Vocabulary: 0-10
+        if 'vocabulary_score' in result_data:
+            result_data['vocabulary_score'] = max(0, min(10, result_data['vocabulary_score']))
+        
+        # Grammar: 0-10
+        if 'grammar_score' in result_data:
+            result_data['grammar_score'] = max(0, min(10, result_data['grammar_score']))
+        
+        # Task Achievement: 0-40
+        if 'task_achievement_score' in result_data:
+            result_data['task_achievement_score'] = max(0, min(40, result_data['task_achievement_score']))
+        
+        # Range & Accuracy: 0-40
+        if 'range_accuracy_score' in result_data:
+            result_data['range_accuracy_score'] = max(0, min(40, result_data['range_accuracy_score']))
+        
+        return result_data
+    
     async def evaluate_students(self, cadet_responses):
-        """Run the evaluation process for all students"""
+        """Run parallel evaluation using kickoff_for_each - OPTIMAL METHOD!"""
         if not cadet_responses:
             return []
         
-        results = []
+        total = len(cadet_responses)
+        logging.info(f"Starting evaluation of {total} students using kickoff_for_each")
         
-        for idx, response in enumerate(cadet_responses):
-            try:
-                logging.info(f"Evaluating cadet {response['cadetNumber']} ({idx+1}/{len(cadet_responses)})")
-                
-                # DIRECT KLP INJECTION - No hallucination risk
-                vocabulary_list = self.klp_loader.get_vocabulary_list(response['bookNumber'])
-                grammar_structures = self.klp_loader.get_grammar_structures(response['bookNumber'])
-                
-                # Vocabulary Task - ONLY receives vocabulary list
-                vocabulary_task = Task(
-                    description=f"""
+        # Get book number (assuming all students are from same book)
+        book_number = cadet_responses[0]['bookNumber']
+        
+        # DIRECT KLP INJECTION - No hallucination risk
+        vocabulary_list = self.klp_loader.get_vocabulary_list(book_number)
+        grammar_structures = self.klp_loader.get_grammar_structures(book_number)
+        
+        logging.info(f"All students from {book_number}")
+        logging.info(f"Vocabulary list length: {len(str(vocabulary_list))}")
+        logging.info(f"Grammar structures length: {len(str(grammar_structures))}")
+        
+        # Define tasks with placeholders for student data
+        vocabulary_task = Task(
+            description="""
 STUDENT RESPONSE:
-{response['response']}
+{response}
 
 KLP VOCABULARY LIST FOR THIS BOOK (ONLY count words from this list):
-{vocabulary_list}
+""" + vocabulary_list + """
 
 SCORING CRITERIA - Vocabulary Usage (0-10 points):
 - 0 = No response
@@ -369,23 +414,21 @@ SCORING CRITERIA - Vocabulary Usage (0-10 points):
 
 IMPORTANT: Be extremely strict - ONLY count vocabulary words that appear in the KLP vocabulary list above.
 
-Count the vocabulary words from the KLP list that appear in the student's response.
-Check if they are used correctly and appropriately.
+Count the vocabulary words from the KLP list that appear in the student's response. Check if they are used correctly and appropriately.
 
-Return ONLY valid JSON: {{"vocabulary_score": X, "vocab_words_found": ["word1", "word2"]}}
-                    """,
-                    agent=self.vocabulary_agent,
-                    expected_output="Valid JSON with vocabulary_score (0-10) and list of found words"
-                )
-                
-                # Grammar Task - ONLY receives grammar structures
-                grammar_task = Task(
-                    description=f"""
+You MUST return ONLY valid JSON in this exact format:
+{{"vocabulary_score": <number 0-10>, "vocab_words_found": ["word1", "word2"]}}
+            """,
+            expected_output='Valid JSON: {"vocabulary_score": X, "vocab_words_found": ["word1", "word2"]}'
+        )
+        
+        grammar_task = Task(
+            description="""
 STUDENT RESPONSE:
-{response['response']}
+{response}
 
 KLP GRAMMAR STRUCTURES FOR THIS BOOK (ONLY count structures from this list):
-{grammar_structures}
+""" + grammar_structures + """
 
 SCORING CRITERIA - Grammar Usage (0-10 points):
 - 0 = No response
@@ -397,23 +440,21 @@ SCORING CRITERIA - Grammar Usage (0-10 points):
 
 IMPORTANT: Be extremely strict - ONLY count grammar structures that appear in the KLP grammar list above.
 
-Identify which grammar structure(s) from the KLP list appear in the student's response.
-Check if they are used correctly.
+Identify which grammar structure(s) from the KLP list appear in the student's response. Check if they are used correctly.
 
-Return ONLY valid JSON: {{"grammar_score": X, "grammar_structures_found": ["structure1"]}}
-                    """,
-                    agent=self.grammar_agent,
-                    expected_output="Valid JSON with grammar_score (0-10) and list of found structures"
-                )
-                
-                # Task Achievement Task
-                task_achievement_task = Task(
-                    description=f"""
+You MUST return ONLY valid JSON in this exact format:
+{{"grammar_score": <number 0-10>, "grammar_structures_found": ["structure1"]}}
+            """,
+            expected_output='Valid JSON: {"grammar_score": X, "grammar_structures_found": ["structure1"]}'
+        )
+        
+        task_achievement_task = Task(
+            description="""
 QUESTION:
-{response['question']}
+{question}
 
 STUDENT RESPONSE:
-{response['response']}
+{response}
 
 SCORING CRITERIA - Task Achievement (0-40 points):
 - 0 = No response
@@ -428,17 +469,16 @@ Evaluate:
 2. Is the response within the word limit?
 3. How well-developed is the response?
 
-Return ONLY valid JSON: {{"task_achievement_score": X, "feedback": "one sentence explanation"}}
-                    """,
-                    agent=self.task_achievement_agent,
-                    expected_output="Valid JSON with task_achievement_score (0-40) and brief feedback"
-                )
-                
-                # Range & Accuracy Task
-                range_accuracy_task = Task(
-                    description=f"""
+You MUST return ONLY valid JSON in this exact format:
+{{"task_achievement_score": <number 0-40>, "feedback": "one sentence explanation"}}
+            """,
+            expected_output='Valid JSON: {"task_achievement_score": X, "feedback": "one sentence"}'
+        )
+        
+        range_accuracy_task = Task(
+            description="""
 STUDENT RESPONSE:
-{response['response']}
+{response}
 
 SCORING CRITERIA - Range & Accuracy (0-40 points):
 Grammar, punctuation, and spelling quality:
@@ -456,52 +496,69 @@ Evaluate:
 4. Punctuation accuracy
 5. Overall comprehensibility
 
-Return ONLY valid JSON: {{"range_accuracy_score": X, "feedback": "one sentence explanation"}}
-                    """,
-                    agent=self.range_accuracy_agent,
-                    expected_output="Valid JSON with range_accuracy_score (0-40) and brief feedback"
-                )
-                
-                # Quality Assurance Task
-                quality_task = Task(
-                    description=f"""
-CADET: {response['cadetNumber']}
-BOOK: {response['bookNumber']}
-RESPONSE: {response['response']}
+You MUST return ONLY valid JSON in this exact format:
+{{"range_accuracy_score": <number 0-40>, "feedback": "one sentence explanation"}}
+            """,
+            expected_output='Valid JSON: {"range_accuracy_score": X, "feedback": "one sentence"}'
+        )
+        
+        quality_task = Task(
+            description="""
+CADET: {cadetNumber}
+BOOK: {bookNumber}
+RESPONSE: {response}
 
 Review all specialist evaluations and provide:
 1. A comprehensive final feedback summary (2-3 sentences)
 2. Specific strengths the student demonstrated
 3. Specific areas for improvement
 
-Return ONLY valid JSON: {{"final_feedback": "comprehensive 2-3 sentence assessment"}}
-                    """,
-                    agent=self.quality_agent,
-                    expected_output="Valid JSON with comprehensive final_feedback"
-                )
-                
-                # Create crew with HIERARCHICAL process
-                crew = Crew(
-                    agents=[self.manager_agent, self.vocabulary_agent, self.grammar_agent,
-                           self.task_achievement_agent, self.range_accuracy_agent, self.quality_agent],
-                    tasks=[vocabulary_task, grammar_task, task_achievement_task, 
-                           range_accuracy_task, quality_task],
-                    process=Process.hierarchical,
-                    manager_agent=self.manager_agent,
-                    verbose=True
-                )
-                
-                # Execute with timeout
+You MUST return ONLY valid JSON in this exact format:
+{{"final_feedback": "comprehensive 2-3 sentence assessment"}}
+            """,
+            expected_output='Valid JSON: {"final_feedback": "comprehensive assessment"}'
+        )
+        
+        # Create ONE crew that will be reused for all students
+        crew = Crew(
+            agents=[self.manager_agent, self.vocabulary_agent, self.grammar_agent,
+                   self.task_achievement_agent, self.range_accuracy_agent, self.quality_agent],
+            tasks=[vocabulary_task, grammar_task, task_achievement_task,
+                  range_accuracy_task, quality_task],
+            process=Process.hierarchical,
+            manager_agent=self.manager_agent,
+            verbose=True
+        )
+        
+        # Prepare inputs for all students
+        inputs = []
+        for response in cadet_responses:
+            inputs.append({
+                'cadetNumber': response['cadetNumber'],
+                'bookNumber': response['bookNumber'],
+                'question': response['question'],
+                'response': response['response']
+            })
+        
+        try:
+            # Run kickoff_for_each - parallel processing by CrewAI
+            logging.info(f"Calling kickoff_for_each with {len(inputs)} students")
+            
+            crew_results = await asyncio.to_thread(
+                crew.kickoff_for_each,
+                inputs=inputs
+            )
+            
+            logging.info(f"Received {len(crew_results)} results from crew")
+            
+            # Process results
+            final_results = []
+            for idx, crew_result in enumerate(crew_results):
                 try:
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(crew.kickoff),
-                        timeout=60.0
-                    )
-                    
-                    # Parse actual results
+                    # Initialize result data
                     result_data = {
-                        'cadet_id': response['cadetNumber'],
-                        'book_number': response['bookNumber'],
+                        'cadet_id': inputs[idx]['cadetNumber'],
+                        'book_number': inputs[idx]['bookNumber'],
                         'vocab_score': 0,
                         'grammar_score': 0,
                         'task_achievement_score': 0,
@@ -509,47 +566,53 @@ Return ONLY valid JSON: {{"final_feedback": "comprehensive 2-3 sentence assessme
                         'final_feedback': "Evaluation incomplete"
                     }
                     
-                    # Extract scores from task outputs
-                    if hasattr(result, 'tasks_output'):
-                        for task_output in result.tasks_output:
+                    # Parse result
+                    if hasattr(crew_result, 'raw'):
+                        parsed = self.parse_agent_output(crew_result.raw)
+                        if parsed:
+                            result_data.update(parsed)
+                    
+                    # Fallback: try tasks_output
+                    if result_data['vocab_score'] == 0 and hasattr(crew_result, 'tasks_output'):
+                        for task_output in crew_result.tasks_output:
                             parsed = self.parse_agent_output(task_output.raw)
                             if parsed:
                                 result_data.update(parsed)
                     
-                    # Fallback: try parsing from result.raw
-                    if result_data['vocab_score'] == 0:
-                        parsed = self.parse_agent_output(str(result))
-                        if parsed:
-                            result_data.update(parsed)
+                    # Validate scores
+                    result_data = self.validate_scores(result_data)
+                    final_results.append(result_data)
                     
-                    results.append(result_data)
-                    logging.info(f"Successfully evaluated cadet {response['cadetNumber']}")
+                    logging.info(f"Processed student {idx+1}/{total}: {result_data}")
                     
-                except asyncio.TimeoutError:
-                    logging.warning(f"Timeout evaluating cadet {response['cadetNumber']}")
-                    results.append({
-                        'cadet_id': response['cadetNumber'],
-                        'book_number': response['bookNumber'],
+                except Exception as e:
+                    logging.error(f"Error processing result {idx}: {e}", exc_info=True)
+                    final_results.append({
+                        'cadet_id': inputs[idx]['cadetNumber'],
+                        'book_number': inputs[idx]['bookNumber'],
                         'vocab_score': 0,
                         'grammar_score': 0,
                         'task_achievement_score': 0,
                         'range_accuracy_score': 0,
-                        'final_feedback': "Evaluation timeout - please retry."
+                        'final_feedback': f"Processing error: {str(e)[:100]}"
                     })
-                
-            except Exception as e:
-                logging.error(f"Error evaluating cadet {response['cadetNumber']}: {e}")
-                results.append({
-                    'cadet_id': response['cadetNumber'],
-                    'book_number': response['bookNumber'],
-                    'vocab_score': 0,
-                    'grammar_score': 0,
-                    'task_achievement_score': 0,
-                    'range_accuracy_score': 0,
-                    'final_feedback': f"Evaluation error: {str(e)[:100]}"
-                })
-        
-        return results
+            
+            logging.info(f"Completed evaluation: {len(final_results)}/{total} successful")
+            return final_results
+            
+        except Exception as e:
+            logging.error(f"Error in kickoff_for_each: {e}", exc_info=True)
+            
+            # Return error results for all students
+            return [{
+                'cadet_id': response['cadetNumber'],
+                'book_number': response['bookNumber'],
+                'vocab_score': 0,
+                'grammar_score': 0,
+                'task_achievement_score': 0,
+                'range_accuracy_score': 0,
+                'final_feedback': f"Batch evaluation error: {str(e)[:100]}"
+            } for response in cadet_responses]
 
 def create_excel_download(results):
     """Create Excel file for download"""

@@ -196,7 +196,7 @@ class CrewAIManager:
         self.klp_loader = klp_loader
         self.feedback_manager = feedback_manager
         self.llm = ChatOpenAI(
-            model="gpt-5-mini-2025-08-07",
+            model="gpt-5.1-2025-11-13",
         )
         
         # Initialize agents ONCE - reused for all students

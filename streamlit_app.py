@@ -197,7 +197,7 @@ class CrewAIManager:
         self.feedback_manager = feedback_manager
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
-            temperature=0.3,
+            temperature=0.7,
             max_tokens=3000
         )
         

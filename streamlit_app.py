@@ -196,7 +196,7 @@ class CrewAIManager:
         self.klp_loader = klp_loader
         self.feedback_manager = feedback_manager
         self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model="gpt-5-mini-2025-08-07",
             temperature=0.7,
             max_tokens=3000
         )

@@ -197,8 +197,6 @@ class CrewAIManager:
         self.feedback_manager = feedback_manager
         self.llm = ChatOpenAI(
             model="gpt-5-mini-2025-08-07",
-            temperature=0.7,
-            max_tokens=3000
         )
         
         # Initialize agents ONCE - reused for all students
